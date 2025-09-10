@@ -46,6 +46,7 @@ async function startServer() {
     usersCollection = client.db("usersdatabase").collection("users");
     parcelCollection = client.db("parcelDB").collection("parcels");
     paymentCollection = client.db("paymentDB").collection("payments");
+    ridersCollection = client.db("ridersDB").collection("riders");
 
     console.log("✅ MongoDB connected");
 
@@ -64,11 +65,21 @@ const verifyFBToken = async(req, res, next) => {
       if(!authHeader){
         return res.status(401).send({message:'unAuthorized access'})
       }
-      const token = authHeader.split('')[1];
+      const token = authHeader.split(' ')[1];
       if(!token){
         return res.status(401).send({message:'unAuthorized access'})
       }
-      next();
+      // verify the token
+      try{
+        const decoded = await admin.auth().verifyIdToken(token);
+        req.decoded = decoded;
+        next();
+      }
+      catch(error){
+        console.error('Token verification error:', error);
+         return res.status(403).send({message:'forbidden access'})
+      }
+      
     } 
 
  app.get("/", (req, res) => {
@@ -76,22 +87,114 @@ const verifyFBToken = async(req, res, next) => {
  });
 
 // for users
-  app.post('/users', async (req, res) => {
-  const { email, name } = req.body;
-  const userExists = await usersCollection.findOne({ email });
-  if (userExists) {
-    return res.status(200).send({ message: 'User already exists', inserted: false });
+// GET /users/search?email=...
+app.get("/users/search", async (req, res) => {
+  const { email } = req.query;
+  if (!email) return res.json({ users: [] });
+
+  const users = await usersCollection
+    .find({ email: { $regex: email, $options: "i" } }) // <-- partial match
+    .limit(10)
+    .toArray();
+
+  res.json({ users });
+});
+
+// PUT /users/:id/role
+app.put("/users/:id/role", async (req, res) => {
+  const { id } = req.params;
+  const { role } = req.body;
+
+  if (!role) {
+    return res.status(400).json({ success: false, message: "Role is required" });
   }
 
-  const user = {
-    name,
-    email,
-    createdAt: new Date()
-  };
+  try {
+    const query = { _id: new ObjectId(id) };
+    const user = await usersCollection.findOne(query);
 
-  const result = await usersCollection.insertOne(user);
-  res.send(result);
- });
+    if (!user) {
+      return res.status(404).json({ success: false, message: "User not found" });
+    }
+
+    const updateResult = await usersCollection.updateOne(query, {
+      $set: { role }
+    });
+
+    res.json({
+      success: true,
+      modifiedCount: updateResult.modifiedCount,
+      user: { ...user, role }
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// GET /users/role/:email
+app.get("/users/role/:email", async (req, res) => {
+  try {
+    const { email } = req.params;
+
+    if (!email) {
+      return res.status(400).json({ success: false, message: "Email is required" });
+    }
+
+    const user = await usersCollection.findOne({ email });
+
+    if (!user) {
+      return res.status(404).json({ success: false, message: "User not found" });
+    }
+
+    res.json({ success: true, email: user.email, role: user.role });
+  } catch (err) {
+    console.error("Error fetching role:", err);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+
+
+
+  // POST create new user
+ app.post('/users', async (req, res) => {
+  try {
+    const { email, name } = req.body;
+
+    if (!email) {
+      return res.status(400).json({ success: false, message: "Email is required" });
+    }
+
+    const userExists = await usersCollection.findOne({ email });
+    if (userExists) {
+      return res.status(200).json({ 
+        success: true, 
+        message: 'User already exists', 
+        inserted: false, 
+        user: userExists 
+      });
+    }
+
+    const user = {
+      name: name || null,
+      email,
+      role: "user",
+      createdAt: new Date()
+    };
+
+    const result = await usersCollection.insertOne(user);
+    res.status(201).json({ 
+      success: true, 
+      message: "User created successfully", 
+      inserted: true, 
+      user: { ...user, _id: result.insertedId } 
+    });
+  } catch (err) {
+    console.error("Error creating user:", err);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
 
 
 // GET all parcels or by email
@@ -148,6 +251,106 @@ const verifyFBToken = async(req, res, next) => {
     res.status(500).json({ success: false, message: "Failed to delete parcel" });
   }
  });
+// Riders
+// GET all pending riders
+app.get("/riders/pending", async (req, res) => {
+  try {
+    const pendingRiders = await ridersCollection
+      .find({ status: "pending" })
+      .sort({ createdAt: -1 }) // latest first
+      .toArray();
+
+    res.status(200).json({ success: true, riders: pendingRiders });
+  } catch (err) {
+    console.error("Failed to fetch pending riders:", err);
+    res.status(500).json({ success: false, message: "Failed to fetch pending riders" });
+  }
+});
+
+
+app.post('/riders', async(req, res)=> {
+  try {
+    const rider = req.body;
+    const result = await ridersCollection.insertOne(rider); // ✅ await
+    console.log("Rider added:", result); // ✅ log to terminal
+    res.status(201).json({ insertedId: result.insertedId });
+  } catch(err) {
+    console.error(err);
+    res.status(500).json({ message: "Failed to add rider" });
+  }
+});
+// update rider
+
+app.patch("/riders/:id", async (req, res) => {
+  const { id } = req.params;
+  const { status } = req.body;
+
+  try {
+    const query = { _id: new ObjectId(id) };
+    const rider = await ridersCollection.findOne(query);
+
+    if (!rider) {
+      return res.status(404).json({ message: "Rider not found" });
+    }
+
+    // Update rider status
+    const updateRider = await ridersCollection.updateOne(query, {
+      $set: { status, updatedAt: new Date() }
+    });
+
+    // Ensure the corresponding user exists
+    if (rider.email) {
+      const user = await usersCollection.findOne({ email: rider.email });
+      if (user) {
+        await usersCollection.updateOne(
+          { email: rider.email },
+          { $set: { role: status === "active" ? "rider" : user.role } }
+        );
+      } else {
+        // If user does not exist, create with role = rider if approved
+        await usersCollection.insertOne({
+          name: rider.name || null,
+          email: rider.email,
+          role: status === "active" ? "rider" : "user",
+          createdAt: new Date()
+        });
+      }
+    }
+
+    res.json({ modifiedCount: updateRider.modifiedCount });
+  } catch (err) {
+    console.error("Error updating rider:", err);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+// DELETE rider
+app.delete("/riders/:id", async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const query = { _id: new ObjectId(id) };
+    const result = await ridersCollection.deleteOne(query);
+
+    res.status(200).json({ deletedCount: result.deletedCount });
+  } catch (err) {
+    console.error("Delete rider error:", err);
+    res.status(500).json({ message: "Failed to delete rider" });
+  }
+});
+
+app.get("/riders/active", async (req, res) => {
+  const { search } = req.query;
+  const query = { status: "active" };
+
+  if (search) {
+    query.name = { $regex: search, $options: "i" };
+  }
+
+  const riders = await ridersCollection.find(query).toArray();
+  res.json({ riders });
+});
+
 
 // POST create payment intent (Stripe)
 app.post("/create-payment-intent", async (req, res) => {
@@ -169,7 +372,6 @@ app.post("/create-payment-intent", async (req, res) => {
 app.post("/payments", async (req, res) => {
   try {
     const { parcelId, paymentMethod, userEmail, tranxId } = req.body;
-
     const query = ObjectId.isValid(parcelId) ? { _id: new ObjectId(parcelId) } : { _id: parcelId };
     const parcel = await parcelCollection.findOne(query);
     if (!parcel) return res.status(404).json({ message: "Parcel not found" });
@@ -198,9 +400,19 @@ app.post("/payments", async (req, res) => {
 });
 
 // GET all payments or by email / parcelId
-app.get("/payments", verifyFBToken, async (req, res) => {
+ app.get("/payments", verifyFBToken, async (req, res) => {
   const { email, parcelId } = req.query;
   try {
+    console.log('headers:', req.headers);
+    console.log('query:', req.query);
+    console.log('decoded from middleware:', req.decoded);
+
+    const userEmail = email || req.decoded.email;
+
+    if (req.decoded.email !== userEmail) {
+      return res.status(403).send({ message: 'Forbidden access' });
+    }
+
     const query = {};
     if (email) query.userEmail = email;
     if (parcelId) query.parcelId = parcelId;
@@ -212,5 +424,6 @@ app.get("/payments", verifyFBToken, async (req, res) => {
     res.status(500).json({ success: false, message: "Failed to fetch payments" });
   }
 });
+
 
 
