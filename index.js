@@ -59,7 +59,7 @@ async function startServer() {
 }
 
 startServer();
-
+        // verify firebase token
 const verifyFBToken = async(req, res, next) => {
       const authHeader = req.headers.authorization;
       if(!authHeader){
@@ -82,6 +82,17 @@ const verifyFBToken = async(req, res, next) => {
       
     } 
 
+    // verify admin token
+  const verifyAdmin = async(req, res, next) => {
+    const email = req.decoded.email;
+    const query = {email};
+    const user = await usersCollection.findOne(query);
+    if(!user || user.role !== "admin"){
+      return res.status(403).send({message:"forbidden access"})
+    }
+    next();
+  }   
+
  app.get("/", (req, res) => {
   res.send("🚀 ProFast Server is Running...");
  });
@@ -100,8 +111,8 @@ app.get("/users/search", async (req, res) => {
   res.json({ users });
 });
 
-// PUT /users/:id/role
-app.put("/users/:id/role", async (req, res) => {
+//  /users/:id/role
+ app.patch("/users/:id/role", verifyFBToken, verifyAdmin, async (req, res) => {
   const { id } = req.params;
   const { role } = req.body;
 
@@ -153,9 +164,6 @@ app.get("/users/role/:email", async (req, res) => {
     res.status(500).json({ success: false, message: "Server error" });
   }
 });
-
-
-
 
   // POST create new user
  app.post('/users', async (req, res) => {
@@ -253,7 +261,7 @@ app.get("/users/role/:email", async (req, res) => {
  });
 // Riders
 // GET all pending riders
-app.get("/riders/pending", async (req, res) => {
+app.get("/riders/pending",verifyFBToken,verifyAdmin, async (req, res) => {
   try {
     const pendingRiders = await ridersCollection
       .find({ status: "pending" })
@@ -266,6 +274,44 @@ app.get("/riders/pending", async (req, res) => {
     res.status(500).json({ success: false, message: "Failed to fetch pending riders" });
   }
 });
+
+// GET /parcels/assignable?district=Barisal
+// Assign rider to parcel
+app.patch("/parcels/:id/assign-rider", verifyFBToken, verifyAdmin, async (req, res) => {
+  const { id } = req.params;
+  const { riderId, riderName } = req.body;
+
+  if (!riderId || !riderName) {
+    return res.status(400).json({ success: false, message: "Rider ID and name are required" });
+  }
+
+  try {
+    const query = { _id: new ObjectId(id) };
+    const update = {
+      $set: {
+        assignedRider: {
+          riderId,
+          riderName,
+        },
+        status: "assigned",
+        updatedAt: new Date(),
+      },
+    };
+
+    const result = await parcelCollection.updateOne(query, update);
+
+    if (result.modifiedCount === 0) {
+      return res.status(404).json({ success: false, message: "Parcel not found or already assigned" });
+    }
+
+    res.json({ success: true, message: `Rider ${riderName} assigned successfully!` });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+
 
 
 app.post('/riders', async(req, res)=> {
@@ -339,16 +385,32 @@ app.delete("/riders/:id", async (req, res) => {
   }
 });
 
-app.get("/riders/active", async (req, res) => {
-  const { search } = req.query;
-  const query = { status: "active" };
+// app.get("/riders/active",verifyFBToken,verifyAdmin, async (req, res) => {
+//   const { search } = req.query;
+//   const query = { status: "active" };
 
-  if (search) {
-    query.name = { $regex: search, $options: "i" };
+//   if (search) {
+//     query.name = { $regex: search, $options: "i" };
+//   }
+
+//   const riders = await ridersCollection.find(query).toArray();
+//   res.json({ riders });
+// });
+
+app.get("/riders/active", verifyFBToken, verifyAdmin, async (req, res) => {
+  const { district } = req.query; // client side থেকে পাঠাও
+  try {
+    let query = { status: "active" };
+    if (district) {
+      query.district = { $regex: district, $options: "i" };
+    }
+
+    const riders = await ridersCollection.find(query).toArray();
+    res.json({ riders });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Server error" });
   }
-
-  const riders = await ridersCollection.find(query).toArray();
-  res.json({ riders });
 });
 
 
